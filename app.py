@@ -7,6 +7,8 @@ import yaml
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from signal import signal, SIGHUP
 
+from prometheus_client.exposition import generate_latest
+from prometheus_client import Histogram, Counter
 
 CONFIGFILE = os.getenv('ALERTHOOKS_CONFIGFILE', '/etc/prometheus/alerthooks/alerthooks.yml')
 PORT = int(os.getenv('ALERTHOOKS_LISTEN_PORT', 8080))
@@ -18,6 +20,15 @@ except:
 
 CONFIG = {}
 
+FAILED_REQUESTS = Counter('alerthooks_failed_requests_total',
+                          'Failed Hooks total count',
+                          ['endpoint'])
+
+REQUESTS_HISTOGRAM = Histogram('alerthooks_request_latency_seconds',
+                               'Time in seconds a request takes',
+                               ['endpoint'])
+
+
 def load_config(_signum=None, _stack_frame=None):
     global CONFIG
     logging.info('(re)loading config %s', CONFIGFILE)
@@ -26,19 +37,26 @@ def load_config(_signum=None, _stack_frame=None):
 
 class AlertHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        self.path = self.path.rstrip('/')
         if self.path == '/healthz':
             self.send_response_only(200)
+        elif self.path == '/metrics':
+            generate_latest()
+            self.send_response_only(200)
+            self.wfile.write(generate_latest())
         else:
-            self.send_response(404)
+            self.send_error(404)
         self.end_headers()
 
     def do_POST(self):
         self.path = self.path.rstrip('/')
         try:
-            self.process_alert(CONFIG[self.path])
+            with REQUESTS_HISTOGRAM.labels(endpoint=self.path).time():
+                self.process_alert(CONFIG[self.path])
         except KeyError:
             logging.warning('No such path "%s" configured!', self.path)
-            self.send_response(404)
+            FAILED_REQUESTS.labels(endpoint=self.path).inc()
+            self.send_error(404)
         self.end_headers()
 
     def process_alert(self, alert_config):
@@ -48,10 +66,12 @@ class AlertHandler(BaseHTTPRequestHandler):
             self.send_response(200)
         except KeyError:
             logging.warning('Command for path "%s" undefined!', self.path)
-            self.send_response(500)
+            FAILED_REQUESTS.labels(endpoint=self.path).inc()
+            self.send_error(500)
         except subprocess.CalledProcessError:
             logging.warning('Command "%s" failed!', alert_config['command'])
-            self.send_response(500)
+            FAILED_REQUESTS.labels(endpoint=self.path).inc()
+            self.send_error(500)
 
 def main():
     logging.basicConfig(handlers=[logging.StreamHandler()], level=LOG_LEVEL)
