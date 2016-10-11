@@ -27,7 +27,7 @@ def load_config(_signum=None, _stack_frame=None):
 class AlertHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/healthz':
-            self.send_response(200)
+            self.send_response_only(200)
         else:
             self.send_response(404)
         self.end_headers()
